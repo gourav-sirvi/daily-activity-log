@@ -1,0 +1,64 @@
+name: Daily Activity Log
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # Runs daily at 06:00 UTC
+  workflow_dispatch:      # Allows manual trigger from GitHub UI
+
+permissions:
+  contents: write
+
+jobs:
+  update-log:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Check for user activity today
+        id: check-activity
+        run: |
+          USER="gourav-sirvi"
+          TODAY=$(date -u +%F)
+          echo "Checking activity for $USER on $TODAY..."
+          
+          # Query GitHub API (use USER_ACTIVITY_TOKEN if available, otherwise GITHUB_TOKEN)
+          TOKEN="${{ secrets.USER_ACTIVITY_TOKEN }}"
+          if [ -z "$TOKEN" ]; then
+            TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          fi
+          
+          EVENTS=$(curl -s -H "Authorization: Bearer $TOKEN" "https://api.github.com/users/$USER/events")
+          
+          # Check for contribution events today, excluding activity in this repository itself
+          HAS_ACTIVITY=$(echo "$EVENTS" | jq --arg TODAY "$TODAY" --arg REPO "${{ github.repository }}" '
+            [
+              .[] 
+              | select(.actor.login == "'"$USER"'")
+              | select(.repo.name != $REPO)
+              | select(.created_at | startswith($TODAY))
+              | select(.type == "PushEvent" or .type == "CreateEvent" or .type == "PullRequestEvent" or .type == "IssuesEvent")
+            ] | length
+          ')
+          
+          if [ "$HAS_ACTIVITY" -gt 0 ]; then
+            echo "Found $HAS_ACTIVITY activity event(s) today. Skipping daily log commit."
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "No activity events found today. Proceeding with daily commit."
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update timestamp log
+        if: steps.check-activity.outputs.skip == 'false'
+        run: |
+          echo "Last run: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> activity.log
+
+      - name: Commit and push
+        if: steps.check-activity.outputs.skip == 'false'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add activity.log
+          git commit -m "Daily activity log update [skip ci]" || echo "Nothing to commit"
+          git push
